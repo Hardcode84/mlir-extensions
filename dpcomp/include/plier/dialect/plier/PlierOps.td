@@ -140,13 +140,11 @@ def GetItemOp : Plier_Op<"getitem", [NoSideEffect]> {
 
 def SetItemOp : Plier_Op<"setitem", []> {
   let arguments = (ins AnyType : $target, AnyType : $index, AnyType : $value);
-
-  let builders = [];
+  let results = (outs Optional<AnyType>:$result);
 }
 
 def GetiterOp : Plier_Op<"getiter", [NoSideEffect]> {
   let arguments = (ins AnyType : $value);
-
   let results = (outs AnyType);
 
   let builders = [OpBuilder<(ins "::mlir::Value" : $value)>];

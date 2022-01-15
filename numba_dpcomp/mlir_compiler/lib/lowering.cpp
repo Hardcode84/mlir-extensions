@@ -487,14 +487,18 @@ private:
   }
 
   void setitem(py::handle target, py::handle index, py::handle value) {
-    builder.create<plier::SetItemOp>(getCurrentLoc(), loadvar(target),
+    auto loc = getCurrentLoc();
+    mlir::Type retType;
+    builder.create<plier::SetItemOp>(loc, retType, loadvar(target),
                                      loadvar(index), loadvar(value));
   }
 
   void staticSetitem(py::handle target, py::handle index, py::handle value) {
     auto loc = getCurrentLoc();
-    builder.create<plier::SetItemOp>(
-        loc, loadvar(target), lowerStaticIndex(loc, index), loadvar(value));
+    mlir::Type retType;
+    builder.create<plier::SetItemOp>(loc, retType, loadvar(target),
+                                     lowerStaticIndex(loc, index),
+                                     loadvar(value));
   }
 
   void storevar(mlir::Value val, py::handle inst) {
