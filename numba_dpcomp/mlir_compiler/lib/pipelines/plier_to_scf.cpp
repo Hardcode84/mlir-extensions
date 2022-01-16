@@ -18,6 +18,7 @@
 #include <mlir/Dialect/SCF/SCF.h>
 #include <mlir/Dialect/StandardOps/IR/Ops.h>
 #include <mlir/IR/BlockAndValueMapping.h>
+#include <mlir/IR/Dominance.h>
 #include <mlir/Pass/PassManager.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 #include <mlir/Transforms/Passes.h>
@@ -616,10 +617,157 @@ void PlierToScfPass::runOnOperation() {
   });
 }
 
+struct ConvertSideEffetsToSsaPass
+    : public mlir::PassWrapper<ConvertSideEffetsToSsaPass,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+  virtual void
+  getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::StandardOpsDialect>();
+    registry.insert<plier::PlierDialect>();
+  }
+
+  void runOnOperation() override;
+};
+
+static llvm::SmallVector<mlir::Block *, 8>
+buildDomFrontier(mlir::DominanceInfo &dom, mlir::Region &reg,
+                 mlir::Block *block) {
+  auto &domTree = dom.getDomTree(&reg);
+  llvm::SmallSetVector<mlir::Block *, 8> ret;
+  llvm::SmallVector<mlir::Block *> descendants;
+  domTree.getDescendants(block, descendants);
+  for (auto d : descendants)
+    for (auto s : d->getSuccessors())
+      if (!domTree.dominates(block, s))
+        ret.insert(s);
+
+  return ret.takeVector();
+}
+
+static void convertToSSA(mlir::PatternRewriter &rewriter, mlir::Value origValue,
+                         mlir::Value newValue) {
+  assert(origValue.getType() == newValue.getType());
+  assert(origValue.getParentRegion() == newValue.getParentRegion());
+  auto &region = *origValue.getParentRegion();
+  mlir::DominanceInfo dom;
+  auto newValueOp = newValue.getDefiningOp();
+  assert(newValue);
+
+  llvm::SmallVector<mlir::OpOperand *> toUpdate;
+  for (auto &use : origValue.getUses()) {
+    auto user = use.getOwner();
+    if (user == newValueOp)
+      continue;
+
+    if (dom.properlyDominates(user, newValueOp))
+      continue;
+
+    if (dom.properlyDominates(newValueOp, user)) {
+      rewriter.updateRootInPlace(
+          user, [&]() { user->setOperand(use.getOperandNumber(), newValue); });
+      continue;
+    }
+
+    toUpdate.emplace_back(&use);
+  }
+
+  if (toUpdate.empty())
+    return;
+
+  mlir::OpBuilder::InsertionGuard g(rewriter);
+  auto argType = newValue.getType();
+  auto frontier = buildDomFrontier(dom, region, newValue.getParentBlock());
+  assert(!frontier.empty());
+  llvm::SmallVector<mlir::Block *> predecessors;
+  llvm::SmallVector<mlir::Value> trueArgs;
+  llvm::SmallVector<mlir::Value> falseArgs;
+  auto assignArgs = [](auto &dst, auto src) {
+    dst.assign(src.begin(), src.end());
+  };
+  for (auto f : frontier) {
+    mlir::Value newArg;
+    for (auto i : llvm::reverse(llvm::seq<size_t>(0, toUpdate.size()))) {
+      auto &use = *toUpdate[i];
+      auto *owner = use.getOwner();
+      if (!dom.dominates(f, owner->getBlock()))
+        continue;
+
+      std::swap(toUpdate[i], toUpdate.back());
+      toUpdate.pop_back();
+      if (!newArg) {
+        newArg = f->addArgument(argType);
+        auto preds = f->getPredecessors();
+        predecessors.assign(preds.begin(), preds.end());
+        for (auto p : predecessors) {
+          bool useNewVal = dom.dominates(newValue.getParentBlock(), p);
+          auto prevVal = (useNewVal ? newValue : origValue);
+          auto term = p->getTerminator();
+          assert(term);
+          rewriter.setInsertionPoint(term);
+          if (auto br = mlir::dyn_cast<mlir::BranchOp>(term)) {
+            assignArgs(trueArgs, br.getDestOperands());
+            trueArgs.emplace_back(prevVal);
+            rewriter.replaceOpWithNewOp<mlir::BranchOp>(term, f, trueArgs);
+          } else if (auto condBr = mlir::dyn_cast<mlir::CondBranchOp>(term)) {
+            auto trueDest = condBr.getTrueDest();
+            assignArgs(trueArgs, condBr.getTrueDestOperands());
+            auto falseDest = condBr.getFalseDest();
+            assignArgs(falseArgs, condBr.getFalseDestOperands());
+            auto cond = condBr.getCondition();
+            if (trueDest == f)
+              trueArgs.emplace_back(prevVal);
+            if (falseDest == f)
+              falseArgs.emplace_back(prevVal);
+            rewriter.replaceOpWithNewOp<mlir::CondBranchOp>(
+                term, cond, trueDest, trueArgs, falseDest, falseArgs);
+          } else {
+            llvm_unreachable("Invalid terminator");
+          }
+        }
+      }
+
+      rewriter.updateRootInPlace(owner, [&]() { use.set(newArg); });
+    }
+  }
+  assert(toUpdate.empty());
+}
+
+struct SetItemToSSA : public mlir::OpRewritePattern<plier::SetItemOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(plier::SetItemOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumResults() != 0)
+      return mlir::failure();
+
+    auto target = op.target();
+    auto targetType = target.getType();
+    auto loc = op->getLoc();
+    auto newVal = rewriter.create<plier::SetItemOp>(loc, targetType, target,
+                                                    op.index(), op.value());
+    rewriter.eraseOp(op);
+    convertToSSA(rewriter, target, newVal.getResult(0));
+    return mlir::success();
+  }
+};
+
+void ConvertSideEffetsToSsaPass::runOnOperation() {
+  auto context = &getContext();
+
+  mlir::OwningRewritePatternList patterns(context);
+
+  patterns.insert<SetItemToSSA>(context);
+
+  auto op = getOperation();
+  (void)mlir::applyPatternsAndFoldGreedily(op, std::move(patterns));
+}
+
 static void populatePlierToScfPipeline(mlir::OpPassManager &pm) {
   pm.addPass(mlir::createCanonicalizerPass());
-  pm.addPass(std::make_unique<PlierToScfPass>());
+  pm.addPass(std::make_unique<ConvertSideEffetsToSsaPass>());
   pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(std::make_unique<PlierToScfPass>());
 }
 } // namespace
 
