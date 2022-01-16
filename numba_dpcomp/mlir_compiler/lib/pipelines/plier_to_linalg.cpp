@@ -505,7 +505,7 @@ static bool isUniTuple(mlir::Type type) {
 class GetItemUniTupleConversionPattern
     : public mlir::OpConversionPattern<plier::GetItemOp> {
 public:
-  using OpConversionPattern<plier::GetItemOp>::OpConversionPattern;
+  using OpConversionPattern::OpConversionPattern;
 
   mlir::LogicalResult
   matchAndRewrite(plier::GetItemOp op, plier::GetItemOp::Adaptor adaptor,
@@ -531,6 +531,18 @@ public:
 
     auto tensor = rewriter.create<mlir::tensor::FromElementsOp>(loc, elems);
     rewriter.replaceOpWithNewOp<plier::GetItemOp>(op, elemType, tensor, index);
+    return mlir::success();
+  }
+};
+
+class ConvertDummyUse : public mlir::OpConversionPattern<plier::DummyUseOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(plier::DummyUseOp op, plier::DummyUseOp::Adaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<plier::DummyUseOp>(op, adaptor.source());
     return mlir::success();
   }
 };
@@ -1513,6 +1525,13 @@ void PlierToLinalgPass::runOnOperation() {
                                    dstType.isa<mlir::ShapedType>());
   });
 
+  target.addDynamicallyLegalOp<plier::DummyUseOp>(
+      [&typeConverter](plier::DummyUseOp op) -> bool {
+        auto srcType = op.source().getType();
+        auto dstType = typeConverter.convertType(srcType);
+        return srcType == dstType;
+      });
+
   plier::populateControlFlowTypeConversionRewritesAndTarget(typeConverter,
                                                             patterns, target);
 
@@ -1522,7 +1541,8 @@ void PlierToLinalgPass::runOnOperation() {
       SetitemOpLowering,
       LowerTensorCasts,
       UnrankedToElementCasts,
-      GetItemUniTupleConversionPattern
+      GetItemUniTupleConversionPattern,
+      ConvertDummyUse
       // clang-format on
       >(typeConverter, &context);
 
@@ -1948,9 +1968,16 @@ void AdditionalBufferize::runOnFunction() {
     return !op.getType().isa<mlir::RankedTensorType>();
   });
 
+  target.addDynamicallyLegalOp<plier::DummyUseOp>(
+      [&typeConverter](plier::DummyUseOp op) -> bool {
+        auto srcType = op.source().getType();
+        auto dstType = typeConverter.convertType(srcType);
+        return srcType == dstType;
+      });
+
   patterns.insert<BufferizeReshape, BufferizeExtractSlice, BufferizeInsert,
-                  BufferizeForceCopy, BufferizeReduceRank>(typeConverter,
-                                                           context);
+                  BufferizeForceCopy, BufferizeReduceRank, ConvertDummyUse>(
+      typeConverter, context);
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();
@@ -2010,9 +2037,24 @@ void CloneArgsPass::runOnFunction() {
   }
 }
 
+struct RemoveDummyUses : public mlir::OpRewritePattern<plier::DummyUseOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(plier::DummyUseOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    rewriter.eraseOp(op);
+    return mlir::success();
+  }
+};
+
+struct RemoveDummyUsesPass
+    : public plier::RewriteWrapperPass<RemoveDummyUsesPass, mlir::FuncOp, void,
+                                       RemoveDummyUses> {};
+
 struct ReplaceClones
     : public mlir::OpRewritePattern<mlir::bufferization::CloneOp> {
-  using mlir::OpRewritePattern<mlir::bufferization::CloneOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
 
   mlir::LogicalResult
   matchAndRewrite(mlir::bufferization::CloneOp op,
@@ -2093,6 +2135,9 @@ static void populatePlierToLinalgOptPipeline(mlir::OpPassManager &pm) {
   pm.addPass(mlir::createFuncBufferizePass());
   pm.addNestedPass<mlir::FuncOp>(
       mlir::bufferization::createFinalizingBufferizePass());
+
+  pm.addNestedPass<mlir::FuncOp>(std::make_unique<RemoveDummyUsesPass>());
+  pm.addNestedPass<mlir::FuncOp>(mlir::createCanonicalizerPass());
 
   pm.addNestedPass<mlir::FuncOp>(mlir::createBufferHoistingPass());
   pm.addNestedPass<mlir::FuncOp>(mlir::createBufferLoopHoistingPass());

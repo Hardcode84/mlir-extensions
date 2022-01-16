@@ -490,6 +490,18 @@ struct UndefOpLowering : public mlir::OpConversionPattern<plier::UndefOp> {
   }
 };
 
+class ConvertDummyUse : public mlir::OpConversionPattern<plier::DummyUseOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(plier::DummyUseOp op, plier::DummyUseOp::Adaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const final {
+    rewriter.replaceOpWithNewOp<plier::DummyUseOp>(op, adaptor.source());
+    return mlir::success();
+  }
+};
+
 static mlir::Type coerce(mlir::Type type0, mlir::Type type1) {
   // TODO: proper rules
   assert(type0 != type1);
@@ -1300,6 +1312,13 @@ void PlierToStdPass::runOnOperation() {
     return srcType == dstType;
   });
 
+  target.addDynamicallyLegalOp<plier::DummyUseOp>(
+      [&typeConverter](plier::DummyUseOp op) -> bool {
+        auto srcType = op.source().getType();
+        auto dstType = typeConverter.convertType(srcType);
+        return srcType == dstType;
+      });
+
   patterns.insert<
       // clang-format off
       BinOpLowering,
@@ -1309,7 +1328,8 @@ void PlierToStdPass::runOnOperation() {
       LiteralLowering<plier::CastOp>,
       LiteralLowering<plier::GlobalOp>,
       LowerGlobals,
-      UndefOpLowering
+      UndefOpLowering,
+      ConvertDummyUse
       // clang-format on
       >(typeConverter, context);
 

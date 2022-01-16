@@ -264,5 +264,9 @@ def ForceCopyOp : PlierUtil_Op<"force_copy", [ViewLikeOpInterface]> {
   }];
 }
 
+def DummyUseOp : PlierUtil_Op<"dummy_use", []> {
+  let arguments = (ins AnyType : $source);
+}
+
 
 #endif // PLIER_UTIL_OPS

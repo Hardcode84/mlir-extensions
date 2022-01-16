@@ -24,6 +24,7 @@
 #include <mlir/Transforms/Passes.h>
 
 #include "plier/dialect/plier/dialect.hpp"
+#include "plier/dialect/plier_util/dialect.hpp"
 #include "plier/transforms/arg_lowering.hpp"
 #include "plier/transforms/common_opts.hpp"
 
@@ -617,6 +618,46 @@ void PlierToScfPass::runOnOperation() {
   });
 }
 
+struct InsertDummyUses
+    : public mlir::PassWrapper<InsertDummyUses,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+  virtual void
+  getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::StandardOpsDialect>();
+    registry.insert<plier::PlierUtilDialect>();
+  }
+
+  void runOnOperation() override {
+    auto mod = getOperation();
+
+    mlir::OpBuilder builder(&getContext());
+    auto dummyUsesAttr = builder.getStringAttr("plier.have_dummy_uses");
+    for (auto func : mod.getOps<mlir::FuncOp>()) {
+      auto &body = func.getBody();
+      if (body.empty())
+        continue;
+
+      if (func->hasAttr(dummyUsesAttr))
+        continue;
+
+      func->setAttr(dummyUsesAttr, builder.getUnitAttr());
+
+      auto *entryBlock = &body.front();
+      for (auto &block : body) {
+        auto term = block.getTerminator();
+        assert(term);
+        if (!mlir::isa<mlir::ReturnOp>(term))
+          continue;
+
+        auto loc = term->getLoc();
+        builder.setInsertionPoint(term);
+        for (auto arg : entryBlock->getArguments())
+          builder.create<plier::DummyUseOp>(loc, arg);
+      }
+    }
+  }
+};
+
 struct ConvertSideEffetsToSsaPass
     : public mlir::PassWrapper<ConvertSideEffetsToSsaPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -797,6 +838,7 @@ void ConvertSideEffetsToSsaPass::runOnOperation() {
 
 static void populatePlierToScfPipeline(mlir::OpPassManager &pm) {
   pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(std::make_unique<InsertDummyUses>());
   pm.addPass(std::make_unique<ConvertSideEffetsToSsaPass>());
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(std::make_unique<PlierToScfPass>());
