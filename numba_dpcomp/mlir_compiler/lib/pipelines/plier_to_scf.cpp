@@ -651,14 +651,11 @@ static void convertToSSA(mlir::PatternRewriter &rewriter, mlir::Value origValue,
   auto &region = *origValue.getParentRegion();
   mlir::DominanceInfo dom;
   auto newValueOp = newValue.getDefiningOp();
-  assert(newValue);
+  assert(newValueOp);
 
   llvm::SmallVector<mlir::OpOperand *> toUpdate;
   for (auto &use : origValue.getUses()) {
     auto user = use.getOwner();
-    if (user == newValueOp)
-      continue;
-
     if (dom.properlyDominates(user, newValueOp))
       continue;
 
@@ -676,7 +673,8 @@ static void convertToSSA(mlir::PatternRewriter &rewriter, mlir::Value origValue,
 
   mlir::OpBuilder::InsertionGuard g(rewriter);
   auto argType = newValue.getType();
-  auto frontier = buildDomFrontier(dom, region, newValue.getParentBlock());
+  auto newValBlock = newValue.getParentBlock();
+  auto frontier = buildDomFrontier(dom, region, newValBlock);
   assert(!frontier.empty());
   llvm::SmallVector<mlir::Block *> predecessors;
   llvm::SmallVector<mlir::Value> trueArgs;
@@ -699,7 +697,7 @@ static void convertToSSA(mlir::PatternRewriter &rewriter, mlir::Value origValue,
         auto preds = f->getPredecessors();
         predecessors.assign(preds.begin(), preds.end());
         for (auto p : predecessors) {
-          bool useNewVal = dom.dominates(newValue.getParentBlock(), p);
+          bool useNewVal = dom.dominates(newValBlock, p);
           auto prevVal = (useNewVal ? newValue : origValue);
           auto term = p->getTerminator();
           assert(term);
