@@ -629,26 +629,110 @@ struct ConvertSideEffetsToSsaPass
   void runOnOperation() override;
 };
 
-static llvm::SmallVector<mlir::Block *, 8>
-buildDomFrontier(mlir::DominanceInfo &dom, mlir::Region &reg,
-                 mlir::Block *block) {
-  auto &domTree = dom.getDomTree(&reg);
-  llvm::SmallSetVector<mlir::Block *, 8> ret;
-  llvm::SmallVector<mlir::Block *> descendants;
-  domTree.getDescendants(block, descendants);
-  for (auto d : descendants)
-    for (auto s : d->getSuccessors())
-      if (!domTree.dominates(block, s))
-        ret.insert(s);
+struct SSABuilder {
+  SSABuilder(mlir::PatternRewriter &r, mlir::DominanceInfo &d)
+      : rewriter(r), dom(d) {}
 
-  return ret.takeVector();
-}
+  void build(mlir::Type argType, mlir::Value newValue, mlir::Value origValue,
+             llvm::ArrayRef<mlir::OpOperand *> uses) {
+    auto block = newValue.getParentBlock();
+    auto getVal = [&]() { return newValue; };
+    addArgRecursiveImpl(argType, block, getVal, origValue, uses);
+  }
+
+private:
+  llvm::SmallVector<mlir::Block *, 8> buildDomFrontier(mlir::Region &reg,
+                                                       mlir::Block *block) {
+    auto &domTree = dom.getDomTree(&reg);
+    blocksSet.clear();
+    domTree.getDescendants(block, blocksVec);
+    for (auto d : blocksVec)
+      for (auto s : d->getSuccessors())
+        if (!domTree.dominates(block, s))
+          blocksSet.insert(s);
+
+    return blocksSet.takeVector();
+  }
+
+  mlir::Value addArg(mlir::Type argType, mlir::Block *frontier,
+                     mlir::Value newValue, mlir::Value origValue) {
+    auto newValBlock = newValue.getParentBlock();
+    auto newArg = frontier->addArgument(argType);
+    auto preds = frontier->getPredecessors();
+    llvm::SmallVector<mlir::Block *, 2> predecessors;
+    predecessors.assign(preds.begin(), preds.end());
+    auto assignArgs = [](auto &dst, auto src) {
+      dst.assign(src.begin(), src.end());
+    };
+    for (auto p : predecessors) {
+      bool useNewVal = dom.dominates(newValBlock, p);
+      auto prevVal = (useNewVal ? newValue : origValue);
+      auto term = p->getTerminator();
+      assert(term);
+      rewriter.setInsertionPoint(term);
+      if (auto br = mlir::dyn_cast<mlir::BranchOp>(term)) {
+        assignArgs(trueArgs, br.getDestOperands());
+        trueArgs.emplace_back(prevVal);
+        rewriter.replaceOpWithNewOp<mlir::BranchOp>(term, frontier, trueArgs);
+      } else if (auto condBr = mlir::dyn_cast<mlir::CondBranchOp>(term)) {
+        auto trueDest = condBr.getTrueDest();
+        assignArgs(trueArgs, condBr.getTrueDestOperands());
+        auto falseDest = condBr.getFalseDest();
+        assignArgs(falseArgs, condBr.getFalseDestOperands());
+        auto cond = condBr.getCondition();
+        if (trueDest == frontier)
+          trueArgs.emplace_back(prevVal);
+        if (falseDest == frontier)
+          falseArgs.emplace_back(prevVal);
+        rewriter.replaceOpWithNewOp<mlir::CondBranchOp>(
+            term, cond, trueDest, trueArgs, falseDest, falseArgs);
+      } else {
+        llvm_unreachable("Invalid terminator");
+      }
+    }
+    return newArg;
+  }
+
+  void addArgRecursiveImpl(mlir::Type argType, mlir::Block *block,
+                           llvm::function_ref<mlir::Value()> getNewVal,
+                           mlir::Value origValue,
+                           llvm::ArrayRef<mlir::OpOperand *> uses) {
+    auto &region = *origValue.getParentRegion();
+    auto frontier = buildDomFrontier(region, block);
+    for (auto f : frontier) {
+      mlir::Value genVal;
+      auto genPhi = [&]() {
+        if (!genVal) {
+          auto newValue = getNewVal();
+          genVal = addArg(argType, f, newValue, origValue);
+        }
+        return genVal;
+      };
+      for (auto use : uses) {
+        auto owner = use->getOwner();
+        auto ownerBlock = owner->getBlock();
+        if (dom.dominates(f, ownerBlock)) {
+          auto val = genPhi();
+          rewriter.updateRootInPlace(owner, [&]() { use->set(val); });
+        }
+      }
+      addArgRecursiveImpl(argType, f, genPhi, origValue, uses);
+    }
+  }
+
+  mlir::PatternRewriter &rewriter;
+  mlir::DominanceInfo &dom;
+  llvm::SmallVector<mlir::Block *> blocksVec;
+  llvm::SmallSetVector<mlir::Block *, 8> blocksSet;
+
+  llvm::SmallVector<mlir::Value> trueArgs;
+  llvm::SmallVector<mlir::Value> falseArgs;
+};
 
 static void convertToSSA(mlir::PatternRewriter &rewriter, mlir::Value origValue,
                          mlir::Value newValue) {
   assert(origValue.getType() == newValue.getType());
   assert(origValue.getParentRegion() == newValue.getParentRegion());
-  auto &region = *origValue.getParentRegion();
   mlir::DominanceInfo dom;
   auto newValueOp = newValue.getDefiningOp();
   assert(newValueOp);
@@ -656,6 +740,9 @@ static void convertToSSA(mlir::PatternRewriter &rewriter, mlir::Value origValue,
   llvm::SmallVector<mlir::OpOperand *> toUpdate;
   for (auto &use : origValue.getUses()) {
     auto user = use.getOwner();
+    if (user == newValueOp && newValueOp->getBlock()->isEntryBlock())
+      continue;
+
     if (dom.properlyDominates(user, newValueOp))
       continue;
 
@@ -671,63 +758,10 @@ static void convertToSSA(mlir::PatternRewriter &rewriter, mlir::Value origValue,
   if (toUpdate.empty())
     return;
 
-  mlir::OpBuilder::InsertionGuard g(rewriter);
   auto argType = newValue.getType();
-  auto newValBlock = newValue.getParentBlock();
-  auto frontier = buildDomFrontier(dom, region, newValBlock);
-  assert(!frontier.empty());
-  llvm::SmallVector<mlir::Block *> predecessors;
-  llvm::SmallVector<mlir::Value> trueArgs;
-  llvm::SmallVector<mlir::Value> falseArgs;
-  auto assignArgs = [](auto &dst, auto src) {
-    dst.assign(src.begin(), src.end());
-  };
-  for (auto f : frontier) {
-    mlir::Value newArg;
-    for (auto i : llvm::reverse(llvm::seq<size_t>(0, toUpdate.size()))) {
-      auto &use = *toUpdate[i];
-      auto *owner = use.getOwner();
-      if (!dom.dominates(f, owner->getBlock()))
-        continue;
-
-      std::swap(toUpdate[i], toUpdate.back());
-      toUpdate.pop_back();
-      if (!newArg) {
-        newArg = f->addArgument(argType);
-        auto preds = f->getPredecessors();
-        predecessors.assign(preds.begin(), preds.end());
-        for (auto p : predecessors) {
-          bool useNewVal = dom.dominates(newValBlock, p);
-          auto prevVal = (useNewVal ? newValue : origValue);
-          auto term = p->getTerminator();
-          assert(term);
-          rewriter.setInsertionPoint(term);
-          if (auto br = mlir::dyn_cast<mlir::BranchOp>(term)) {
-            assignArgs(trueArgs, br.getDestOperands());
-            trueArgs.emplace_back(prevVal);
-            rewriter.replaceOpWithNewOp<mlir::BranchOp>(term, f, trueArgs);
-          } else if (auto condBr = mlir::dyn_cast<mlir::CondBranchOp>(term)) {
-            auto trueDest = condBr.getTrueDest();
-            assignArgs(trueArgs, condBr.getTrueDestOperands());
-            auto falseDest = condBr.getFalseDest();
-            assignArgs(falseArgs, condBr.getFalseDestOperands());
-            auto cond = condBr.getCondition();
-            if (trueDest == f)
-              trueArgs.emplace_back(prevVal);
-            if (falseDest == f)
-              falseArgs.emplace_back(prevVal);
-            rewriter.replaceOpWithNewOp<mlir::CondBranchOp>(
-                term, cond, trueDest, trueArgs, falseDest, falseArgs);
-          } else {
-            llvm_unreachable("Invalid terminator");
-          }
-        }
-      }
-
-      rewriter.updateRootInPlace(owner, [&]() { use.set(newArg); });
-    }
-  }
-  assert(toUpdate.empty());
+  SSABuilder ssaBuilder(rewriter, dom);
+  mlir::OpBuilder::InsertionGuard g(rewriter);
+  ssaBuilder.build(argType, newValue, origValue, toUpdate);
 }
 
 struct SetItemToSSA : public mlir::OpRewritePattern<plier::SetItemOp> {
