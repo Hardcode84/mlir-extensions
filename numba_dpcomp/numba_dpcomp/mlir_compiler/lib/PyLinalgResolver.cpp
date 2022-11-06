@@ -573,11 +573,11 @@ static mlir::Value broadcastDim(mlir::OpBuilder &builder, mlir::Location loc,
   assert(val2.getType().isa<mlir::IndexType>());
   auto one = builder.create<mlir::arith::ConstantIndexOp>(loc, 1);
   auto isOne = builder.create<mlir::arith::CmpIOp>(
-      loc, mlir::arith::CmpIPredicate::eq, val1, one);
-  auto tmp = builder.create<mlir::arith::SelectOp>(loc, isOne, val2, val1);
+      loc, mlir::arith::CmpIPredicate::eq, one, val1);
   auto isSame = builder.create<mlir::arith::CmpIOp>(
-      loc, mlir::arith::CmpIPredicate::eq, val1, val2);
-  return builder.create<mlir::arith::SelectOp>(loc, isSame, val1, tmp);
+      loc, mlir::arith::CmpIPredicate::ne, val1, val2);
+  auto tmp = builder.create<mlir::arith::AndIOp>(loc, isOne, isSame);
+  return builder.create<mlir::arith::SelectOp>(loc, tmp, val2, val1);
 }
 
 static mlir::Value expandDim(mlir::OpBuilder &builder, mlir::Location loc,
