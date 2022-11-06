@@ -350,6 +350,28 @@ struct AndIOfAndI : public mlir::OpRewritePattern<mlir::arith::AndIOp> {
   }
 };
 
+struct DimOfSelect : public mlir::OpRewritePattern<mlir::memref::DimOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::memref::DimOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto select = op.getSource().getDefiningOp<mlir::arith::SelectOp>();
+    if (!select)
+      return mlir::failure();
+
+    auto loc = op.getLoc();
+    auto idx = op.getIndex();
+    auto trueVal =
+        rewriter.create<mlir::memref::DimOp>(loc, select.getTrueValue(), idx);
+    auto falseVal =
+        rewriter.create<mlir::memref::DimOp>(loc, select.getFalseValue(), idx);
+    rewriter.replaceOpWithNewOp<mlir::arith::SelectOp>(
+        op, select.getCondition(), trueVal, falseVal);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void ImexUtilDialect::getCanonicalizationPatterns(
@@ -357,7 +379,8 @@ void ImexUtilDialect::getCanonicalizationPatterns(
   results.add<DimExpandShape<mlir::tensor::DimOp, mlir::tensor::ExpandShapeOp>,
               DimExpandShape<mlir::memref::DimOp, mlir::memref::ExpandShapeOp>,
               DimInsertSlice, FillExtractSlice, SpirvInputCSE, GenGlobalId,
-              ReshapeAlloca, CmpIOfSelect, AndIOfAndI>(getContext());
+              ReshapeAlloca, CmpIOfSelect, AndIOfAndI, DimOfSelect>(
+      getContext());
 }
 
 void EnforceShapeOp::build(mlir::OpBuilder &builder,
