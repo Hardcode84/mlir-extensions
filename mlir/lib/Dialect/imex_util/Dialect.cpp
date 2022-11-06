@@ -332,6 +332,24 @@ struct CmpIOfSelect : public mlir::OpRewritePattern<mlir::arith::CmpIOp> {
   }
 };
 
+struct AndIOfAndI : public mlir::OpRewritePattern<mlir::arith::AndIOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::arith::AndIOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto prev = op.getRhs().getDefiningOp<mlir::arith::AndIOp>();
+    if (!prev)
+      return mlir::failure();
+
+    if (op.getLhs() != prev.getLhs())
+      return mlir::failure();
+
+    rewriter.replaceOp(op, prev.getResult());
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void ImexUtilDialect::getCanonicalizationPatterns(
@@ -339,7 +357,7 @@ void ImexUtilDialect::getCanonicalizationPatterns(
   results.add<DimExpandShape<mlir::tensor::DimOp, mlir::tensor::ExpandShapeOp>,
               DimExpandShape<mlir::memref::DimOp, mlir::memref::ExpandShapeOp>,
               DimInsertSlice, FillExtractSlice, SpirvInputCSE, GenGlobalId,
-              ReshapeAlloca, CmpIOfSelect>(getContext());
+              ReshapeAlloca, CmpIOfSelect, AndIOfAndI>(getContext());
 }
 
 void EnforceShapeOp::build(mlir::OpBuilder &builder,
