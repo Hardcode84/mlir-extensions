@@ -554,7 +554,9 @@ def test_copy_fusion2():
 
         assert_equal(res_py, res_jit)
         ir = get_print_buffer()
-        assert ir.count("scf.parallel") == 1, ir
+
+        # 2 loops for broadcasting and 1 for final copy
+        assert ir.count("scf.parallel") == 3, ir
 
 
 def test_broadcast_fusion():
