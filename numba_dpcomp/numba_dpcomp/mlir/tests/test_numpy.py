@@ -518,10 +518,29 @@ def test_loop_fusion3():
         assert ir.count("memref.load") == 2, ir
 
 
-def test_copy_fusion():
+def test_copy_fusion1():
     def py_func(a, b):
         a = a + 1
         b[:] = a
+
+    jit_func = njit(py_func)
+    a = np.arange(13)
+
+    res_py = np.zeros_like(a)
+    res_jit = np.zeros_like(a)
+
+    with print_pass_ir([], ["PostLinalgOptPass"]):
+        py_func(a, res_py)
+        jit_func(a, res_jit)
+
+        assert_equal(res_py, res_jit)
+        ir = get_print_buffer()
+        assert ir.count("scf.parallel") == 1, ir
+
+
+def test_copy_fusion2():
+    def py_func(a, b):
+        b[:] = a + b
 
     jit_func = njit(py_func)
     a = np.arange(13)
