@@ -310,6 +310,28 @@ struct ReshapeAlloca : public mlir::OpRewritePattern<mlir::memref::ReshapeOp> {
     return mlir::success();
   }
 };
+
+struct CmpIOfSelect : public mlir::OpRewritePattern<mlir::arith::CmpIOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::arith::CmpIOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op.getPredicate() != mlir::arith::CmpIPredicate::ne)
+      return mlir::failure();
+
+    auto select = op.getLhs().getDefiningOp<mlir::arith::SelectOp>();
+    if (!select)
+      return mlir::failure();
+
+    if (select.getFalseValue() != op.getRhs())
+      return mlir::failure();
+
+    rewriter.replaceOp(op, select.getCondition());
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void ImexUtilDialect::getCanonicalizationPatterns(
@@ -317,7 +339,7 @@ void ImexUtilDialect::getCanonicalizationPatterns(
   results.add<DimExpandShape<mlir::tensor::DimOp, mlir::tensor::ExpandShapeOp>,
               DimExpandShape<mlir::memref::DimOp, mlir::memref::ExpandShapeOp>,
               DimInsertSlice, FillExtractSlice, SpirvInputCSE, GenGlobalId,
-              ReshapeAlloca>(getContext());
+              ReshapeAlloca, CmpIOfSelect>(getContext());
 }
 
 void EnforceShapeOp::build(mlir::OpBuilder &builder,
