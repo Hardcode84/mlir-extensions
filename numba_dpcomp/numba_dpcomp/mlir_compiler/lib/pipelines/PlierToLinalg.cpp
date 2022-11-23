@@ -2588,6 +2588,9 @@ struct InlineAggresivelyPass
         continue;
 
       auto visitor = [&](mlir::func::CallOp call) -> mlir::WalkResult {
+        if (call->hasAttr(attrName))
+          return mlir::WalkResult::advance();
+
         auto symbol = module.lookupSymbol<mlir::func::FuncOp>(call.getCallee());
         if (!symbol || !symbol->hasAttr(attrName))
           return mlir::WalkResult::interrupt();
@@ -2598,7 +2601,7 @@ struct InlineAggresivelyPass
       if (func->walk(visitor).wasInterrupted())
         continue;
 
-      userFunc->setAttr(attrName, unitAttr);
+      func->setAttr(attrName, unitAttr);
       worklist.push_back(userFunc);
     }
   }
