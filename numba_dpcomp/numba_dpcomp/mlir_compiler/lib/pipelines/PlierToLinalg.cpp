@@ -66,6 +66,7 @@
 #include "PyLinalgResolver.hpp"
 
 #include <cctype>
+#include <deque>
 
 namespace {
 static int64_t getOptLevel(mlir::Operation *op) {
@@ -2536,6 +2537,73 @@ void LinalgOptInnerPass::runOnOperation() {
   (void)mlir::applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
 }
 
+struct InlineAggresivelyPass
+    : public mlir::PassWrapper<InlineAggresivelyPass,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InlineAggresivelyPass)
+
+  virtual void
+  getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::func::FuncDialect>();
+  }
+
+  void runOnOperation() override {
+    // This pass aggresively marks all functions always-inline if they are
+    // internal, called from single place, and all internal call also marked as
+    // always-inline.
+
+    auto module = getOperation();
+
+    auto moduleFuncs =
+        module.getBodyRegion().front().getOps<mlir::func::FuncOp>();
+    std::deque<mlir::func::FuncOp> worklist(moduleFuncs.begin(),
+                                            moduleFuncs.end());
+
+    mlir::OpBuilder builder(&getContext());
+
+    auto attrName =
+        builder.getStringAttr(imex::util::attributes::getForceInlineName());
+    auto unitAttr = builder.getUnitAttr();
+
+    while (!worklist.empty()) {
+      auto func = worklist.front();
+      worklist.pop_front();
+      assert(func);
+
+      if (func.isPublic() || func.isExternal() || func->hasAttr(attrName))
+        continue;
+
+      auto funcUsers = mlir::SymbolTable::getSymbolUses(func, module);
+      if (!funcUsers || !llvm::hasSingleElement(*funcUsers))
+        continue;
+
+      auto user =
+          mlir::dyn_cast<mlir::func::CallOp>(funcUsers->begin()->getUser());
+
+      if (!user)
+        continue;
+
+      auto userFunc = user->getParentOfType<mlir::func::FuncOp>();
+      if (!userFunc)
+        continue;
+
+      auto visitor = [&](mlir::func::CallOp call) -> mlir::WalkResult {
+        auto symbol = module.lookupSymbol<mlir::func::FuncOp>(call.getCallee());
+        if (!symbol || !symbol->hasAttr(attrName))
+          return mlir::WalkResult::interrupt();
+
+        return mlir::WalkResult::advance();
+      };
+
+      if (func->walk(visitor).wasInterrupted())
+        continue;
+
+      userFunc->setAttr(attrName, unitAttr);
+      worklist.push_back(userFunc);
+    }
+  }
+};
+
 struct BufferizeReshape
     : public mlir::OpConversionPattern<mlir::tensor::ReshapeOp> {
   using OpConversionPattern::OpConversionPattern;
@@ -2912,6 +2980,10 @@ static void populatePlierToLinalgGenPipeline(mlir::OpPassManager &pm) {
 }
 
 static void populatePlierToLinalgOptPipeline(mlir::OpPassManager &pm) {
+  pm.addPass(std::make_unique<InlineAggresivelyPass>());
+  pm.addPass(imex::createForceInlinePass());
+  pm.addPass(mlir::createSymbolDCEPass());
+
   pm.addPass(createCompositePass("LinalgOptPass", [](mlir::OpPassManager &p) {
     p.addPass(imex::createShapeIntegerRangePropagationPass());
     p.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
