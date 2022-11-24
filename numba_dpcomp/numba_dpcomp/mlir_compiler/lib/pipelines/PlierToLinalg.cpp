@@ -4,6 +4,7 @@
 
 #include "pipelines/PlierToLinalg.hpp"
 
+#include <mlir/Conversion/AffineToStandard/AffineToStandard.h>
 #include <mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Arith/Transforms/Passes.h>
@@ -2909,6 +2910,8 @@ static void populatePlierToLinalgGenPipeline(mlir::OpPassManager &pm) {
         p.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
         p.addNestedPass<mlir::func::FuncOp>(
             std::make_unique<PostPlierToLinalgInnerPass>());
+        p.addNestedPass<mlir::func::FuncOp>(
+            mlir::memref::createResolveShapedTypeResultDimsPass());
       }));
 }
 
@@ -2917,6 +2920,8 @@ static void populatePlierToLinalgOptPipeline(mlir::OpPassManager &pm) {
     p.addPass(imex::createShapeIntegerRangePropagationPass());
     p.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
     p.addNestedPass<mlir::func::FuncOp>(std::make_unique<LinalgOptInnerPass>());
+    p.addNestedPass<mlir::func::FuncOp>(
+        mlir::memref::createResolveShapedTypeResultDimsPass());
   }));
 
   pm.addPass(imex::createNtensorToMemrefPass());
@@ -2952,16 +2957,17 @@ static void populatePlierToLinalgOptPipeline(mlir::OpPassManager &pm) {
   pm.addNestedPass<mlir::func::FuncOp>(
       std::make_unique<FinalizeStridedLayoutPass>());
 
-  pm.addPass(mlir::memref::createExpandOpsPass());
+  pm.addPass(mlir::memref::createNormalizeMemRefsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::memref::createExpandOpsPass());
 
   pm.addPass(
       createCompositePass("MemrefSimplifyPass", [](mlir::OpPassManager &p) {
         p.addPass(mlir::createCanonicalizerPass());
-        p.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
         p.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
         p.addPass(mlir::memref::createSimplifyExtractStridedMetadataPass());
         p.addPass(mlir::memref::createResolveShapedTypeResultDimsPass());
-        p.addPass(mlir::memref::createNormalizeMemRefsPass());
+        p.addNestedPass<mlir::func::FuncOp>(mlir::createLowerAffinePass());
+        p.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
       }));
 
   pm.addNestedPass<mlir::func::FuncOp>(
@@ -2982,13 +2988,17 @@ static void populatePlierToLinalgOptPipeline(mlir::OpPassManager &pm) {
   pm.addPass(imex::createPromoteBoolMemrefPass());
   pm.addNestedPass<mlir::func::FuncOp>(imex::createUpliftMathPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
-  pm.addNestedPass<mlir::func::FuncOp>(
-      mlir::createLoopInvariantCodeMotionPass());
 
-  pm.addPass(imex::createShapeIntegerRangePropagationPass());
-  pm.addNestedPass<mlir::func::FuncOp>(mlir::createCanonicalizerPass());
   pm.addPass(
       createCompositePass("PostLinalgOptPass", [](mlir::OpPassManager &p) {
+        p.addNestedPass<mlir::func::FuncOp>(
+            mlir::createLoopInvariantCodeMotionPass());
+        p.addPass(imex::createShapeIntegerRangePropagationPass());
+        p.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
+        p.addPass(mlir::memref::createSimplifyExtractStridedMetadataPass());
+        p.addNestedPass<mlir::func::FuncOp>(
+            mlir::memref::createResolveShapedTypeResultDimsPass());
+        p.addNestedPass<mlir::func::FuncOp>(mlir::createLowerAffinePass());
         p.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
         // ToDo: This pass also tries to do some simple fusion, whic should be
         // split in separate pass
