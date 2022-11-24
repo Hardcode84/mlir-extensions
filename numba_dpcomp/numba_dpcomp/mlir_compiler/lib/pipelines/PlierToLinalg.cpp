@@ -17,6 +17,7 @@
 #include <mlir/Dialect/Linalg/Passes.h>
 #include <mlir/Dialect/Linalg/Transforms/Transforms.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
+#include <mlir/Dialect/MemRef/Transforms/Passes.h>
 #include <mlir/Dialect/SCF/IR/SCF.h>
 #include <mlir/Dialect/SCF/Transforms/Passes.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
@@ -2950,6 +2951,19 @@ static void populatePlierToLinalgOptPipeline(mlir::OpPassManager &pm) {
   pm.addPass(std::make_unique<OptimizeStridedLayoutPass>());
   pm.addNestedPass<mlir::func::FuncOp>(
       std::make_unique<FinalizeStridedLayoutPass>());
+
+  pm.addPass(mlir::memref::createExpandOpsPass());
+
+  pm.addPass(
+      createCompositePass("MemrefSimplifyPass", [](mlir::OpPassManager &p) {
+        p.addPass(mlir::createCanonicalizerPass());
+        p.addNestedPass<mlir::func::FuncOp>(mlir::createCSEPass());
+        p.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
+        p.addPass(mlir::memref::createSimplifyExtractStridedMetadataPass());
+        p.addPass(mlir::memref::createResolveShapedTypeResultDimsPass());
+        p.addPass(mlir::memref::createNormalizeMemRefsPass());
+      }));
+
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::bufferization::createBufferDeallocationPass());
   pm.addPass(mlir::createCanonicalizerPass());
