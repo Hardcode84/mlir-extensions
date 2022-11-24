@@ -93,6 +93,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     MLIRLinalgTransforms
     MLIRMathToLLVM
     MLIRMathToLibm
+    MLIRMemRefTransforms
     MLIRReconcileUnrealizedCasts
     MLIRSCFToGPU
     MLIRSPIRVSerialization
