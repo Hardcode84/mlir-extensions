@@ -1171,6 +1171,28 @@ struct ChangeLayoutSelect
   }
 };
 
+struct ChangeLayoutReinterpret
+    : public mlir::OpRewritePattern<mlir::memref::ReinterpretCastOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::memref::ReinterpretCastOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto cl = op.getSource().getDefiningOp<imex::util::ChangeLayoutOp>();
+    if (!cl)
+      return mlir::failure();
+
+    auto src = cl.getSource();
+    auto dstType = op.getResult().getType();
+    auto offset = op.getMixedOffsets().front();
+    auto sizes = op.getMixedSizes();
+    auto strides = op.getMixedStrides();
+    rewriter.replaceOpWithNewOp<mlir::memref::ReinterpretCastOp>(
+        op, dstType, src, offset, sizes, strides);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void ChangeLayoutOp::getCanonicalizationPatterns(
@@ -1181,7 +1203,8 @@ void ChangeLayoutOp::getCanonicalizationPatterns(
       ChangeLayoutFromCast, ChangeLayoutLoad, ChangeLayoutStore,
       ChangeLayoutSubview, ChangeLayoutLinalgGeneric, ChangeLayoutLinalgFill,
       ChangeLayoutIf, ChangeLayout1DReshape, ChangeLayoutSliceGetItem,
-      ChangeLayoutCopy, ChangeLayoutExpandShape, ChangeLayoutSelect>(context);
+      ChangeLayoutCopy, ChangeLayoutExpandShape, ChangeLayoutSelect,
+      ChangeLayoutReinterpret>(context);
 }
 
 static mlir::Value propagateCasts(mlir::Value val, mlir::Type thisType);
