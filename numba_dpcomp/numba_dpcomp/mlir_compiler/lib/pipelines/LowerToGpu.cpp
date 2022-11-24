@@ -230,8 +230,8 @@ struct KernelMemrefOpsMovementPass
     mlir::DominanceInfo dom(func);
     body.walk([&](mlir::gpu::LaunchOp launch) {
       launch.getBody().walk([&](mlir::Operation *op) {
-        if (!mlir::isa<mlir::memref::DimOp,
-                       imex::util::ExtractMemrefMetadataOp>(op))
+        if (!mlir::isa<mlir::memref::DimOp, imex::util::ExtractMemrefMetadataOp,
+                       mlir::memref::ExtractStridedMetadataOp>(op))
           return;
 
         for (auto &arg : op->getOpOperands()) {

@@ -190,10 +190,21 @@ struct InsertGPUAllocs
               if (!memref)
                 return mlir::WalkResult::interrupt();
 
+              auto getParent = [](mlir::Value val) -> mlir::Value {
+                if (auto parentView =
+                        val.getDefiningOp<mlir::ViewLikeOpInterface>())
+                  return parentView.getViewSource();
+
+                if (auto parentView = val.getDefiningOp<
+                                      mlir::memref::ExtractStridedMetadataOp>())
+                  return parentView.getSource();
+
+                return {};
+              };
+
               for (auto mem : *memref) {
-                while (auto parentView =
-                           mem.getDefiningOp<mlir::ViewLikeOpInterface>())
-                  mem = parentView.getViewSource();
+                while (auto parentView = getParent(mem))
+                  mem = parentView;
 
                 for (auto alias : aliases.resolve(mem)) {
                   auto op = alias.getDefiningOp();
